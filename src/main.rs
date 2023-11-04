@@ -5,8 +5,8 @@ use piston_window::*;
 
 const CELL_DIMENSION: f64 = 2.0;
 
-const DEFAULT_WIDTH: u32 = 1500;
-const DEFAULT_HEIGHT: u32 = 900;
+const DEFAULT_WIDTH: u32 = 256;
+const DEFAULT_HEIGHT: u32 = 256;
 
 const DEFAULT_WCELL_COUNT: usize = DEFAULT_WIDTH as usize / CELL_DIMENSION as usize;
 const DEFAULT_HCELL_COUNT: usize = DEFAULT_HEIGHT as usize / CELL_DIMENSION as usize;
@@ -21,6 +21,8 @@ struct Lenia {
     active_cells: AHashSet<(usize, usize)>,
     mode: Mode,
     delta_t: f64,
+    /// in cells width
+    kernel_radius: usize,
 }
 
 impl Lenia {
@@ -32,6 +34,7 @@ impl Lenia {
         ),
         mode: Option<Mode>,
         delta_t: Option<f64>,
+        kernel_radius: Option<usize>,
     ) -> Self {
         if area_w_max >= wcell_count {
             area_w_max = wcell_count - 1;
@@ -55,6 +58,7 @@ impl Lenia {
             active_cells: AHashSet::new(),
             mode: mode.unwrap_or(Mode::Lenia),
             delta_t: delta_t.unwrap_or(1.0),
+            kernel_radius: kernel_radius.unwrap_or(13),
         }
     }
 
@@ -77,7 +81,63 @@ impl Lenia {
         }
     }
 
-    fn compute_next_lenia_frame(&mut self) {}
+    fn compute_next_lenia_frame(&mut self) {
+        let (w, h) = (self.cells[0].len(), self.cells.len());
+        fn kernel_core_function(distance_from_cell: usize, kernel_radius: usize) -> f64 {
+            const ALPHA: f64 = 4.0;
+            let r = ((distance_from_cell as f64 / kernel_radius as f64) * 10.0).round() / 10.0;
+            (ALPHA * (1.0 - 1.0 / (ALPHA * r * (1.0 - r)))).exp()
+        }
+        fn growth_function(potential_distribution: f64) -> f64 {
+            const MU: f64 = 0.31;
+            const SIGMA: f64 = 0.049;
+            const K: f64 = 2.0 * SIGMA * SIGMA;
+
+            let l = (potential_distribution - MU).abs();
+            2.0 * (-(l * l) / K).exp() - 1.0
+        }
+
+        let mut next_frame_cells = self.cells.clone();
+        #[allow(clippy::needless_range_loop)]
+        for raw in 0..h {
+            for col in 0..w {
+                let mut potential_distribution = 0.0;
+                let mut max_kernel = 0.0;
+                for neighbour_raw in (raw as isize - self.kernel_radius as isize)
+                    ..=(raw as isize + self.kernel_radius as isize)
+                {
+                    for neighbour_col in (col as isize - self.kernel_radius as isize)
+                        ..=(col as isize + (self.kernel_radius) as isize)
+                    {
+                        if neighbour_raw == raw as isize && neighbour_col == col as isize {
+                            continue;
+                        }
+                        let distance_from_cell = (raw as isize - neighbour_raw).unsigned_abs()
+                            + (col as isize - neighbour_col).unsigned_abs();
+                        if distance_from_cell > self.kernel_radius {
+                            continue;
+                        }
+                        let kernel_val =
+                            kernel_core_function(distance_from_cell, self.kernel_radius);
+                        max_kernel += kernel_val;
+
+                        let (xpos, ypos) = (
+                            neighbour_col.rem_euclid(w as isize - 1) as usize,
+                            neighbour_raw.rem_euclid(h as isize - 1) as usize,
+                        );
+                        potential_distribution += self.cells[ypos][xpos] as f64 * kernel_val;
+                    }
+                }
+                potential_distribution /= max_kernel;
+
+                let growth_mapping = growth_function(potential_distribution);
+                let next_frame_value = (self.cells[raw][col] as f64 + self.delta_t * growth_mapping)
+                    .clamp(0.0, 1.0) as f32;
+                next_frame_cells[raw][col] = next_frame_value;
+            }
+        }
+        self.cells = next_frame_cells; // update to next frame
+    }
 
     fn compute_next_gol_frame(&mut self) {
         let (w, h) = (self.cells[0].len(), self.cells.len());
@@ -132,8 +192,7 @@ impl Lenia {
         };
 
         if self.active_cells.is_empty() {
-            #[allow(clippy::needless_range_loop)]
-            for raw in 0..self.cells.len() {
+            for raw in 0..h {
                 for col in 0..w {
                     update_cell(raw, col);
                 }
@@ -207,7 +266,8 @@ fn main() {
     let mut lenia = Lenia::new(
         (DEFAULT_WCELL_COUNT, DEFAULT_HCELL_COUNT),
         generate_spawn_area(DEFAULT_WCELL_COUNT, DEFAULT_HCELL_COUNT),
-        Some(Mode::GameOfLife),
+        Some(Mode::Lenia),
+        None,
         None,
     );
     let mut window: PistonWindow = WindowSettings::new("Lenia!", [DEFAULT_WIDTH, DEFAULT_HEIGHT])
